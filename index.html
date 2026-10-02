@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>iPhone ボイスチェンジャー</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            text-align: center;
+            margin: 0;
+            min-height: 100vh;
+            box-sizing: border-box;
+        }
+        h1 {
+            font-size: 24px;
+            color: #4facfe;
+            margin-top: 20px;
+            margin-bottom: 20px;
+        }
+        .warning {
+            background-color: #ff3b30;
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            font-size: 14px;
+            font-weight: bold;
+            line-height: 1.5;
+            width: 90%;
+            max-width: 350px;
+            box-shadow: 0 4px 15px rgba(255, 59, 48, 0.3);
+        }
+        select {
+            font-size: 18px;
+            padding: 15px;
+            border-radius: 10px;
+            border: 2px solid #4facfe;
+            background-color: #2c2c2e;
+            color: white;
+            margin-bottom: 50px;
+            width: 90%;
+            max-width: 300px;
+            outline: none;
+            appearance: none;
+            text-align: center;
+        }
+        #start-btn {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 140px;
+            height: 140px;
+            font-size: 22px;
+            font-weight: bold;
+            box-shadow: 0 10px 25px rgba(0, 242, 254, 0.4);
+            transition: transform 0.1s, background 0.3s;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+        }
+        #start-btn:active {
+            transform: scale(0.95);
+        }
+        #start-btn.active {
+            background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%);
+            box-shadow: 0 10px 25px rgba(255, 65, 108, 0.4);
+        }
+    </style>
+</head>
+<body>
+
+    <h1>ボイスチェンジャー</h1>
+    
+    <div class="warning">
+        ⚠️ 警告<br>
+        スピーカーから音が出るとハウリング（キーンという爆音）が起きます。<br>
+        必ず【イヤホン・ヘッドホン】を装着して使用してください。
+    </div>
+
+    <select id="voice-select">
+        <option value="normal">ノーマル（元の声）</option>
+        <option value="anime">アニメ少女</option>
+        <option value="zombie_high">ゾンビ高音</option>
+        <option value="zombie_low">ゾンビ低音</option>
+        <option value="okama">オカマ</option>
+        <option value="super_low">超低音</option>
+        <option value="middle">ミドル</option>
+        <option value="robot">ロボット</option>
+        <option value="helium">ヘリウム</option>
+    </select>
+
+    <button id="start-btn">スタート</button>
+
+    <script>
+        let audioCtx;
+        let stream;
+        let source;
+        let nodesInitialized = false;
+
+        // エフェクト用ノード
+        let pitchShifter;
+        let distortionNode;
+        let biquadFilter;
+        let robotGainNode;
+        let ringOsc;
+        let ringOscGain;
+        let masterGain;
+
+        // --- ピッチシフター生成関数 (iOS対応 クロスフェード方式) ---
+        function createPitchShifter(ctx) {
+            const input = ctx.createGain();
+            const output = ctx.createGain();
+            const bufferTime = 0.100;
+            const fadeTime = 0.050;
+            const sampleRate = ctx.sampleRate;
+
+            const fadeBuffer = ctx.createBuffer(1, sampleRate * bufferTime, sampleRate);
+            const delayBufferUp = ctx.createBuffer(1, sampleRate * bufferTime, sampleRate);
+            const delayBufferDown = ctx.createBuffer(1, sampleRate * bufferTime, sampleRate);
+
+            const fadeData = fadeBuffer.getChannelData(0);
+            const delayUpData = delayBufferUp.getChannelData(0);
+            const delayDownData = delayBufferDown.getChannelData(0);
+
+            const fadeLen = Math.floor(sampleRate * fadeTime);
+            const totalLen = Math.floor(sampleRate * bufferTime);
+
+            for (let i = 0; i < totalLen; i++) {
+                // クロスフェード用窓関数
+                if (i < fadeLen) {
+                    fadeData[i] = Math.sqrt(i / fadeLen);
+                } else if (i >= totalLen - fadeLen) {
+                    fadeData[i] = Math.sqrt(1 - (i - (totalLen - fadeLen)) / fadeLen);
+                } else {
+                    fadeData[i] = 1;
+                }
+                // 音程変更用ノコギリ波
+                delayUpData[i] = (totalLen - i) / totalLen;
+                delayDownData[i] = i / totalLen;
+            }
+
+            const modUp1 = ctx.createBufferSource(); const modUp2 = ctx.createBufferSource();
+            const modDown1 = ctx.createBufferSource(); const modDown2 = ctx.createBufferSource();
+            const fade1 = ctx.createBufferSource(); const fade2 = ctx.createBufferSource();
+
+            [modUp1, modUp2, modDown1, modDown2, fade1, fade2].forEach(n => n.loop = true);
+
+            modUp1.buffer = delayBufferUp; modUp2.buffer = delayBufferUp;
+            modDown1.buffer = delayBufferDown; modDown2.buffer = delayBufferDown;
+            fade1.buffer = fadeBuffer; fade2.buffer = fadeBuffer;
+
+            const modUpGain1 = ctx.createGain(); const modUpGain2 = ctx.createGain();
+            const modDownGain1 = ctx.createGain(); const modDownGain2 = ctx.createGain();
+            const fadeGain1 = ctx.createGain(); const fadeGain2 = ctx.createGain();
+
+            [modUpGain1, modUpGain2, modDownGain1, modDownGain2].forEach(g => g.gain.value = 0);
+
+            const delay1 = ctx.createDelay(1); const delay2 = ctx.createDelay(1);
+            delay1.delayTime.value = 0.05; delay2.delayTime.value = 0.05;
+
+            // 結線
+            input.connect(delay1); input.connect(delay2);
+            delay1.connect(fadeGain1); delay2.connect(fadeGain2);
+            fadeGain1.connect(output); fadeGain2.connect(output);
+
+            modUp1.connect(modUpGain1); modDown1.connect(modDownGain1);
+            modUpGain1.connect(delay1.delayTime); modDownGain1.connect(delay1.delayTime);
+
+            modUp2.connect(modUpGain2); modDown2.connect(modDownGain2);
+            modUpGain2.connect(delay2.delayTime); modDownGain2.connect(delay2.delayTime);
+
+            fade1.connect(fadeGain1.gain); fade2.connect(fadeGain2.gain);
+
+            // 位相を180度ずらして再生
+            const t = ctx.currentTime + 0.1;
+            const halfTime = bufferTime / 2;
+
+            modUp1.start(t); modDown1.start(t); fade1.start(t);
+            modUp2.start(t + halfTime); modDown2.start(t + halfTime); fade2.start(t + halfTime);
+
+            return {
+                input, output,
+                setPitchRatio: (ratio) => {
+                    const now = ctx.currentTime;
+                    if (ratio >= 1) {
+                        const val = (ratio - 1) * bufferTime;
+                        modUpGain1.gain.setTargetAtTime(val, now, 0.01);
+                        modUpGain2.gain.setTargetAtTime(val, now, 0.01);
+                        modDownGain1.gain.setTargetAtTime(0, now, 0.01);
+                        modDownGain2.gain.setTargetAtTime(0, now, 0.01);
+                    } else {
+                        const val = (1 - ratio) * bufferTime;
+                        modUpGain1.gain.setTargetAtTime(0, now, 0.01);
+                        modUpGain2.gain.setTargetAtTime(0, now, 0.01);
+                        modDownGain1.gain.setTargetAtTime(val, now, 0.01);
+                        modDownGain2.gain.setTargetAtTime(val, now, 0.01);
+                    }
+                }
+            };
+        }
+
+        // --- ディストーション曲線生成 ---
+        function makeDistortionCurve(amount) {
+            const n_samples = 44100;
+            const curve = new Float32Array(n_samples);
+            const deg = Math.PI / 180;
+            for (let i = 0; i < n_samples; ++i) {
+                const x = i * 2 / n_samples - 1;
+                curve[i] = (3 + amount) * x * 20 * deg / (Math.PI + amount * Math.abs(x));
+            }
+            return curve;
+        }
+
+        // --- オーディオノード初期化 ---
+        function setupAudioNodes(stream) {
+            if (nodesInitialized) {
+                source = audioCtx.createMediaStreamSource(stream);
+                source.connect(pitchShifter.input);
+                return;
+            }
+            source = audioCtx.createMediaStreamSource(stream);
+
+            pitchShifter = createPitchShifter(audioCtx);
+            distortionNode = audioCtx.createWaveShaper();
+            biquadFilter = audioCtx.createBiquadFilter();
+            
+            // ロボット用リングモジュレーター
+            robotGainNode = audioCtx.createGain();
+            ringOsc = audioCtx.createOscillator();
+            ringOsc.type = 'sine';
+            ringOsc.start();
+            ringOscGain = audioCtx.createGain();
+            ringOsc.connect(ringOscGain);
+            ringOscGain.connect(robotGainNode.gain);
+
+            masterGain = audioCtx.createGain();
+
+            // 接続チェーン
+            source.connect(pitchShifter.input);
+            pitchShifter.output.connect(distortionNode);
+            distortionNode.connect(biquadFilter);
+            biquadFilter.connect(robotGainNode);
+            robotGainNode.connect(masterGain);
+            masterGain.connect(audioCtx.destination);
+
+            nodesInitialized = true;
+            applyEffect(document.getElementById('voice-select').value);
+        }
+
+        // --- エフェクト適用 ---
+        function applyEffect(name) {
+            if (!pitchShifter) return;
+
+            // 初期化（ノーマル状態）
+            pitchShifter.setPitchRatio(1.0);
+            distortionNode.curve = null;
+            biquadFilter.type = 'allpass';
+            biquadFilter.frequency.value = 20000;
+            biquadFilter.gain.value = 0;
+            ringOsc.frequency.value = 0;
+            ringOscGain.gain.value = 0;
+            robotGainNode.gain.value = 1;
+            masterGain.gain.value = 1.5; // 基本音量
+
+            switch (name) {
+                case 'anime': // アニメ少女
+                    pitchShifter.setPitchRatio(1.6);
+                    biquadFilter.type = 'highpass';
+                    biquadFilter.frequency.value = 500;
+                    break;
+                case 'zombie_high': // ゾンビ高音
+                    pitchShifter.setPitchRatio(1.4);
+                    distortionNode.curve = makeDistortionCurve(50); // 歪み
+                    biquadFilter.type = 'bandpass';
+                    biquadFilter.frequency.value = 1500;
+                    ringOsc.frequency.value = 15; // 震え声（トレモロ）
+                    ringOscGain.gain.value = 0.5;
+                    robotGainNode.gain.value = 0.5;
+                    masterGain.gain.value = 0.8;
+                    break;
+                case 'zombie_low': // ゾンビ低音
+                    pitchShifter.setPitchRatio(0.6);
+                    distortionNode.curve = makeDistortionCurve(60);
+                    biquadFilter.type = 'lowpass';
+                    biquadFilter.frequency.value = 1200;
+                    masterGain.gain.value = 1.2;
+                    break;
+                case 'okama': // オカマ（中低音＋鼻声強調）
+                    pitchShifter.setPitchRatio(0.85);
+                    biquadFilter.type = 'peaking';
+                    biquadFilter.frequency.value = 2500;
+                    biquadFilter.Q.value = 3;
+                    biquadFilter.gain.value = 15;
+                    break;
+                case 'super_low': // 超低音
+                    pitchShifter.setPitchRatio(0.4);
+                    biquadFilter.type = 'lowpass';
+                    biquadFilter.frequency.value = 1000;
+                    break;
+                case 'middle': // ミドル（少し低く響く）
+                    pitchShifter.setPitchRatio(0.85);
+                    break;
+                case 'robot': // ロボット
+                    pitchShifter.setPitchRatio(1.0);
+                    biquadFilter.type = 'lowpass';
+                    biquadFilter.frequency.value = 3000;
+                    ringOsc.frequency.value = 40; // 金属的な周波数変調
+                    ringOscGain.gain.value = 1.0;
+                    robotGainNode.gain.value = 0.0;
+                    masterGain.gain.value = 2.5; // 音量が下がるためブースト
+                    break;
+                case 'helium': // ヘリウム
+                    pitchShifter.setPitchRatio(2.2);
+                    biquadFilter.type = 'highpass';
+                    biquadFilter.frequency.value = 800;
+                    break;
+            }
+        }
+
+        // --- イベントリスナー ---
+        document.getElementById('voice-select').addEventListener('change', (e) => {
+            applyEffect(e.target.value);
+        });
+
+        const startBtn = document.getElementById('start-btn');
+        startBtn.addEventListener('click', async () => {
+            // iOS対応：ユーザーアクション内でAudioContextを生成/再開
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+
+            // 停止処理
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                source.disconnect();
+                stream = null;
+                startBtn.textContent = 'スタート';
+                startBtn.classList.remove('active');
+                return;
+            }
+
+            // 開始処理（エコーキャンセル等を無効化し純粋なマイク入力を得る）
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                });
+                startBtn.textContent = 'ストップ';
+                startBtn.classList.add('active');
+                setupAudioNodes(stream);
+            } catch (err) {
+                alert('マイクのアクセスが許可されていないか、HTTPS環境ではありません。');
+            }
+        });
+    </script>
+</body>
+</html>
